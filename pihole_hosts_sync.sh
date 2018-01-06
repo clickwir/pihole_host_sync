@@ -2,7 +2,7 @@
 set -euo pipefail
 # Created by clickwir on 1/5/2018
 # GPL V3.0
-#
+##
 # Get the current list of local hostnames to the other PiHole
 # You'll need to setup SSH to login with passwordless keys
 # 'ssh-keygen' enter-enter-enter
