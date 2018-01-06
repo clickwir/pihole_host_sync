@@ -13,7 +13,7 @@ set -euo pipefail
 # Remote server we are sending the list to
 rem_server=root@10.1.0.2
 clock=$(date)
-work_dir=/opt/pihole_hosts_sync
+work_dir=$(mktemp -d)
 conf="$work_dir"/50-pihole-local.conf
 
 enable_log=no
@@ -22,7 +22,7 @@ if [ "$enable_log" = "yes" ]; then
     # Setup a log
     # Make sure this script is in a good dir for logging
     # eg, not a /etc/cron.daily location
-    log="$work_dir"/pihole_hosts_sync.log
+    log=/tmp/pihole_hosts_sync.log
     if [ ! -f "$log" ]; then
         touch "$log"
         exec 19>"$log"
@@ -54,8 +54,7 @@ fi
 if [ -f "$work_dir"/hosts.local.list ]; then
     scp "$work_dir"/hosts.local.list "$rem_server":/etc/pihole/hosts.local.list
     # Copy myself to the remote server. (TODO: look up definition of virus)
-    ssh "$rem_server" "mkdir -p "$work_dir""
-    scp "${0}" "$rem_server":"$work_dir"/"${0##*/}"
+    scp "${0}" "$rem_server":/opt/"${0##*/}"
 else
     printf "\nOdd, cannot access/find file that should have just been created. Better exit, somethings not right.\n"
     exit 1
@@ -76,5 +75,8 @@ fi
 
 # Then restart dnsmasq
 ssh "$rem_server" 'service dnsmasq restart'
+
+# Cleanup
+rm -rf "$work_dir"
 
 echo "Finished at "$clock" :: Pushing hosts to "$rem_server""
