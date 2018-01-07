@@ -15,6 +15,7 @@ rem_server=root@10.1.0.2
 clock=$(date)
 work_dir=$(mktemp -d)
 conf="$work_dir"/50-pihole-local.conf
+update_self=yes
 
 enable_log=no
 
@@ -39,7 +40,7 @@ fi
 echo "Starting at "$clock" :: Pushing hosts to "$rem_server""
 
 # Check variables for being empty
-[[ -z "$rem_server" || -z "$clock" || -z "$work_dir" || -z "$conf" ]] && { printf "\nServer is not specified. Must quit.\n"; exit 1; }
+[[ -z "$rem_server" || -z "$clock" || -z "$work_dir" || -z "$conf" || -z "$update_self" ]] && { printf "\nServer is not specified. Must quit.\n"; exit 1; }
 
 
 # Get the IP and host name from the current PiHole dnsmasq DHCP file
@@ -75,6 +76,16 @@ fi
 
 # Then restart dnsmasq
 ssh "$rem_server" 'service dnsmasq restart'
+
+
+# Possible bug workaround
+# System that does DHCP doesn't do DNS unless client gets DHCP lease
+# DNS should resolve either way. This should help make sure it does.
+if [ "$update_self" = "yes" ]; then
+    cp "$work_dir"/hosts.local.list /etc/pihole/hosts.local.list
+    cp "$conf" /etc/dnsmasq.d/
+    service dnsmasq restart
+fi
 
 # Cleanup
 rm -rf "$work_dir"
