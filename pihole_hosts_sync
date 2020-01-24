@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Created by clickwir on 1/5/2018
+# GPL V3.0
+##
+# Get the current list of local hostnames to the other PiHole
+# You'll need to setup SSH to login with passwordless keys
+# 'ssh-keygen' enter-enter-enter
+# 'ssh-copy-id root@server'
+if [[ $EUID -ne 0 ]]; then
+   printf "I am not root. Trying to fix...\n" 1>&2
+   sudo "$0" "$@"
+   exit $?
+else
+ printf "I am root. Running...\n"
+fi
+
+
+# Variables
+# Remote server we are sending the list to
+rem_server=root@10.1.0.2
+clock=$(date)
+work_dir=$(mktemp -d)
+conf="$work_dir"/50-pihole-local.conf
+update_self=yes
+enable_log=no
+GREEN=$'\e[1;32m'
+RED=$'\e[1;31m'
+NC=$'\e[0m'
+
+logger -t pihole_sync "Starting sync"
+
+if [ "$enable_log" = "yes" ]; then
+    # Setup a log
+    # Make sure this script is in a good dir for logging
+    # eg, not a /etc/cron.daily location
+    log=/tmp/pihole_hosts_sync.log
+    if [ ! -f "$log" ]; then
+        touch "$log"
+        exec 19>"$log"
+        export BASH_XTRACEFD=19
+        set -x
+    else
+        savelog -n -c 7 "$log"
+        exec 19>"$log"
+        export BASH_XTRACEFD=19
+        set -x
+    fi
+fi
+
+if [ "$rem_server" = "root@serveraddress" ]; then
+    printf "${GREEN}\nYou didn't set the rem_server.${NC}\n\n"
+    exit 1
+fi
+
+# Check variables for being empty
+[[ -z "$rem_server" || -z "$clock" || -z "$work_dir" || -z "$conf" || -z "$update_self" ]] && { printf "${RED}\nWe are missing some variable. Must quit.\n${NC}"; exit 1; }
+
+
+printf "${GREEN}\nStarting at $(date) :: Pushing hosts to "$rem_server"${NC}\n\n"
+
+# Get the IP and host name from the current PiHole dnsmasq DHCP file
+if [ -f /etc/dnsmasq.d/04-pihole-static-dhcp.conf ]; then
+    printf "${GREEN}Generating hosts.local.list file${NC}\n"
+    awk -F ',' '{print $2,$3}' /etc/dnsmasq.d/04-pihole-static-dhcp.conf | sort > "$work_dir"/hosts.local.list
+    echo "10.1.0.1 gw" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.2 ns1" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.3 ns2" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.3 ntp" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.3 time" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.7 mail" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.7 smtp" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.14 minecraft" >> "$work_dir"/hosts.local.list
+    echo "10.1.0.31 unms" >> "$work_dir"/hosts.local.list
+
+else
+    printf "${RED}\nPiHole Static DHCP file not found. Nothing to pull from.${NC}\n"
+    exit 1
+fi
+
+# Send the list to the other server
+if [ -f "$work_dir"/hosts.local.list ]; then
+    printf "${GREEN}Sending hosts.local.list${NC}\n"
+    scp "$work_dir"/hosts.local.list "$rem_server":/etc/pihole/hosts.local.list
+    # Copy myself to the remote server. (TODO: look up definition of virus)
+    scp "${0}" "$rem_server":/opt/"${0##*/}"
+else
+    printf "${RED}\nOdd, cannot access/find file that should have just been created. Better exit, somethings not right.${NC}\n"
+    exit 1
+fi
+
+# Create remote dnsmasq conf file
+# This file tells dnsmasq to use the new hosts file and domain
+#if [ ! -f "$conf" ]; then
+    printf "${GREEN}Generating addon dnsmasq conf file${NC}\n"
+    domain=$(grep domain /etc/dnsmasq.d/02-pihole-dhcp.conf)
+    echo "# Adding my own local list of machines" > "$conf"
+    # Following 2 lines are needed so both "host" and "host.domain" resolve
+    # If left out, things like "plex" will resolve. But "plex.local" will not.
+    echo "$domain" >> "$conf"
+    echo "expand-hosts" >> "$conf"
+    echo "addn-hosts=/etc/pihole/hosts.local.list" >> "$conf"
+    printf "${GREEN}Sending addon dnsmasq conf file${NC}\n"
+    scp "$conf" "$rem_server":/etc/dnsmasq.d/
+#fi
+
+# Then restart dnsmasq
+printf "${GREEN}Restarting dnsmasq on remote server${NC}\n"
+ssh "$rem_server" 'service pihole-FTL restart'
+
+
+# Possible bug workaround
+# System that does DHCP, but doesn't do DNS unless client gets DHCP lease
+# DNS should resolve either way. This should help make sure it does.
+if [ "$update_self" = "yes" ]; then
+    printf "${GREEN}Copying hosts.local.list and addon dnsmasq conf for local dnsmasq${NC}\n"
+    cp "$work_dir"/hosts.local.list /etc/pihole/hosts.local.list
+    cp "$conf" /etc/dnsmasq.d/
+    printf "${GREEN}Restaring dnsmasq on local server${NC}\n"
+    service pihole-FTL restart
+else
+    printf "${RED}You have chosen to NOT update the local system. DNS resolving of DHCP entries may not work.${NC}\n"
+fi
+
+# Make sure secondary DNS server given out via DHCP
+# PiHole might stomp on this, so we need to put it back.
+printf "${GREEN}Checking for SECONDARY DNS entry in DHCP${NC}\n"
+if grep -q "10.1.0.2" /etc/dnsmasq.d/02-pihole-dhcp.conf; then
+    printf "${GREEN}SECONDARY DNS entry found OK${NC}\n"
+else
+    printf "${RED}SECONDARY DNS entry not found. Adding${NC}\n"
+    if echo "dhcp-option=6,0.0.0.0,10.1.0.2" >> /etc/dnsmasq.d/02-pihole-dhcp.conf ; then
+        printf "${GREEN}Added DHCP option 6 for both DNS servers.${NC}\n"
+    else
+        printf "${RED}Adding failed. You should manually review this.${NC}\n"
+    fi
+fi
+    
+
+# Clean up
+printf "${GREEN}Clean up${NC}\n"
+rm -rf "$work_dir"
+
+printf "${GREEN}\nFinished at $(date) :: Pushed hosts to "$rem_server"${NC}\n\n"
+logger -t pihole_sync "End of sync"
